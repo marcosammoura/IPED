@@ -154,6 +154,9 @@ public class IndexTask extends AbstractTask {
                         "Not enough space for the index on " + worker.manager.getIndexTemp().getAbsolutePath()); //$NON-NLS-1$
             else
                 throw e;
+        } catch (IllegalArgumentException e) {
+            LOGGER.warn("{} Error indexing evidence {} {}", Thread.currentThread().getName(), evidence.getPath(), //$NON-NLS-1$
+                e.toString());
         } finally {
             fragReader.close();
         }
