@@ -1419,6 +1419,11 @@ public class UfedXmlReader extends DataSourceReader {
                 }
                 
             }
+            else {
+                // Try to get extracted path from 'file_id' attachment attribute
+                if (item.getMetadata().get(FILE_ID_ATTR) != null)
+                    extracted_path = ufedFileIdToLocalPath.get(item.getMetadata().get(FILE_ID_ATTR));
+            }
             setContent(item, extracted_path);
             return ufedId;
         }
