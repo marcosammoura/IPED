@@ -1,0 +1,10 @@
+###################################
+# AgeEstimation Task configuration
+###################################
+
+# Number of external age estimation processes. If not set, the number of CPU logical cores will be used.
+# You can set this if you have memory usage problems, e.g. if you are using a GPU with very few memory.
+#numAgeEstimationProcesses = 4
+
+# Threshold used to decide if an image is labeled in one category
+categorizationThreshold = 0.6
