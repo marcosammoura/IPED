@@ -45,7 +45,7 @@ import iped.engine.datasource.SleuthkitReader;
 import iped.engine.localization.CategoryLocalization;
 import iped.engine.search.TimelineResults.TimeItemId;
 import iped.engine.task.index.IndexItem;
-import iped.engine.util.Util;
+// concatStrings is provided by engine util but we use BookmarksUtil for bookmark display
 import iped.localization.LocalizedProperties;
 import iped.properties.BasicProps;
 import iped.search.IMultiSearchResult;
@@ -254,7 +254,7 @@ public class ResultTableModel extends AbstractTableModel implements SearchResult
             }
 
             if (field.equals(BOOKMARK_COL)) {
-                return Util.concatStrings(app.appCase.getMultiBookmarks().getBookmarkList(app.ipedResult.getItem(row)));
+                return BookmarksUtil.concatLeafNames(app.appCase.getMultiBookmarks().getBookmarkList(app.ipedResult.getItem(row)));
             }
 
             if (item instanceof TimeItemId) {

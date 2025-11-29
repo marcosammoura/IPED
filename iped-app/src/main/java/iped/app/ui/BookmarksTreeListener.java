@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import javax.swing.event.TreeExpansionEvent;
@@ -29,23 +30,39 @@ import iped.viewers.api.IResultSetFilter;
 import iped.viewers.api.IResultSetFilterer;
 
 public class BookmarksTreeListener implements TreeSelectionListener, TreeExpansionListener, IResultSetFilterer {
-    private HashSet<Object> selection = new HashSet<>();
+    private HashSet<TreePath> selection = new HashSet<>();
     private volatile boolean updatingSelection = false;
     private long collapsed = 0;
     private boolean clearing = false;
 
-    HashMap<Object, IFilter> definedFilters = new HashMap<Object, IFilter>();
+    HashMap<TreePath, IFilter> definedFilters = new HashMap<TreePath, IFilter>();
 
     public Set<String> getSelectedBookmarkNames() {
-        return selection.stream().filter(b -> b != BookmarksTreeModel.ROOT && b != BookmarksTreeModel.NO_BOOKMARKS).map(b -> b.toString()).collect(Collectors.toSet());
+        BookmarksTreeModel model = (BookmarksTreeModel) App.get().bookmarksTree.getModel();
+        Set<String> result = new HashSet<>();
+        for (TreePath sel : selection) {
+            Object last = sel.getLastPathComponent();
+            if (last == BookmarksTreeModel.ROOT || last == BookmarksTreeModel.NO_BOOKMARKS)
+                continue;
+            result.addAll(model.collectAllFullPaths(sel));
+        }
+        return result;
     }
 
     public boolean isRootSelected() {
-        return selection.contains(BookmarksTreeModel.ROOT);
+        for (TreePath tp : selection) {
+            if (tp.getPathCount() == 1 && tp.getLastPathComponent() == BookmarksTreeModel.ROOT)
+                return true;
+        }
+        return false;
     }
 
     public boolean isNoBookmarksSelected() {
-        return selection.contains(BookmarksTreeModel.NO_BOOKMARKS);
+        for (TreePath tp : selection) {
+            if (tp.getPathCount() == 2 && tp.getLastPathComponent() == BookmarksTreeModel.NO_BOOKMARKS)
+                return true;
+        }
+        return false;
     }
 
     @Override
@@ -62,16 +79,17 @@ public class BookmarksTreeListener implements TreeSelectionListener, TreeExpansi
         }
 
         for (TreePath path : evt.getPaths()) {
-            if (selection.contains(path.getLastPathComponent())) {
-                selection.remove(path.getLastPathComponent());
-                definedFilters.remove(path.getLastPathComponent());
+            if (selection.contains(path)) {
+                selection.remove(path);
+                definedFilters.remove(path);
             } else {
-                Object bookmark = path.getLastPathComponent();
-                selection.add(bookmark);
-                if (!bookmark.equals(BookmarksTreeModel.ROOT) && !bookmark.equals(BookmarksTreeModel.NO_BOOKMARKS)) {
-                    HashSet<String> oneBookmark = new HashSet<>();
-                    oneBookmark.add(bookmark.toString());
-                    definedFilters.put(bookmark, new BookMarkFilter(oneBookmark));
+                selection.add(path);
+                Object last = path.getLastPathComponent();
+                if (last != BookmarksTreeModel.ROOT && last != BookmarksTreeModel.NO_BOOKMARKS) {
+                    BookmarksTreeModel model = (BookmarksTreeModel) App.get().bookmarksTree.getModel();
+                    HashSet<String> bookmarkNames = new HashSet<>(model.collectAllFullPaths(path));
+                    if (!bookmarkNames.isEmpty())
+                        definedFilters.put(path, new BookMarkFilter(bookmarkNames));
                 }
             }
         }
@@ -90,40 +108,106 @@ public class BookmarksTreeListener implements TreeSelectionListener, TreeExpansi
     public void updateModelAndSelection() {
 
         updatingSelection = true;
-        Set<String> bookmarkSet = ((BookmarksTreeModel) App.get().bookmarksTree.getModel()).bookmarks;
+        // Prefer authoritative bookmark set from the case (if available) so newly
+        // created bookmarks are included even if the current model hasn't been
+        // updated yet. Fall back to the current model's value when there's no
+        // case (tests, headless environments).
+        Set<String> bookmarkSet = null;
+        if (App.get() != null && App.get().appCase != null && App.get().appCase.getMultiBookmarks() != null) {
+            bookmarkSet = new java.util.TreeSet<>(App.get().appCase.getMultiBookmarks().getBookmarkSet());
+        } else {
+            bookmarkSet = ((BookmarksTreeModel) App.get().bookmarksTree.getModel()).bookmarks;
+        }
 
         if (bookmarkSet != null && !selection.isEmpty()) {
 
-            HashSet<Object> tempSel = new HashSet<>(selection);
+            HashSet<TreePath> tempSel = new HashSet<>(selection);
             selection.clear();
             definedFilters.clear();
 
-            for (Object path : tempSel) {
-                if (path == BookmarksTreeModel.ROOT || path == BookmarksTreeModel.NO_BOOKMARKS || App.get().appCase.getMultiBookmarks().getBookmarkSet().contains(path)) {
-                    selection.add(path);
-                    HashSet<String> oneBookmark = new HashSet<>();
-                    oneBookmark.add(path.toString());
-                    definedFilters.put(path, new BookMarkFilter(oneBookmark));
+            // convert old selection tree paths to canonical nodes using current model
+            BookmarksTreeModel dummy = new BookmarksTreeModel();
+            Set<String> bookmarkSetStrings = new HashSet<>();
+            List<TreePath> needToRestorePaths = new ArrayList<>();
+            boolean hadRoot = false;
+            boolean hadNoBookmarks = false;
+
+            for (TreePath tp : tempSel) {
+                Object last = tp.getLastPathComponent();
+                if (last == BookmarksTreeModel.ROOT) {
+                    hadRoot = true;
+                    continue;
                 }
+                if (last == BookmarksTreeModel.NO_BOOKMARKS) {
+                    hadNoBookmarks = true;
+                    continue;
+                }
+
+                needToRestorePaths.add(tp);
             }
 
+            // re-select corresponding nodes in the rebuilt model
             ArrayList<TreePath> selectedPaths = new ArrayList<TreePath>();
-            for (Object name : selection) {
-                Object[] path = name == BookmarksTreeModel.ROOT ? new Object[] { BookmarksTreeModel.ROOT } : new Object[] { BookmarksTreeModel.ROOT, name };
-                selectedPaths.add(new TreePath(path));
-            }
+            if (hadRoot)
+                selectedPaths.add(new TreePath(new Object[] { BookmarksTreeModel.ROOT }));
+            if (hadNoBookmarks)
+                selectedPaths.add(new TreePath(new Object[] { BookmarksTreeModel.ROOT, BookmarksTreeModel.NO_BOOKMARKS }));
 
             boolean rootCollapsed = App.get().bookmarksTree.isCollapsed(0);
-            App.get().bookmarksTree.setModel(new BookmarksTreeModel());
+            BookmarksTreeModel newModel = new BookmarksTreeModel();
+            // make sure the rebuilt model uses the latest bookmark set so that
+            // newly added children are visible and mapping works correctly
+            if (bookmarkSet != null)
+                newModel.bookmarks = new java.util.TreeSet<>(bookmarkSet);
+            App.get().bookmarksTree.setModel(newModel);
             if (rootCollapsed) {
                 App.get().bookmarksTree.collapseRow(0);
+            }
+
+            // find tree nodes that correspond to the old tree paths
+            for (TreePath oldTp : needToRestorePaths) {
+                Object[] parts = oldTp.getPath();
+                String[] segments = new String[parts.length - 1];
+                for (int i = 1; i < parts.length; i++)
+                    segments[i - 1] = parts[i].toString();
+
+                List<Object> newPath = newModel.getNodePathForSegments(segments);
+                if (newPath != null) {
+                    Object[] tpObjs = new Object[1 + newPath.size()];
+                    tpObjs[0] = BookmarksTreeModel.ROOT;
+                    for (int i = 0; i < newPath.size(); i++)
+                        tpObjs[i + 1] = newPath.get(i);
+
+                    TreePath newTp = new TreePath(tpObjs);
+                    selection.add(newTp);
+                    Set<String> all = new TreeSet<>();
+                    all.addAll(newModel.collectAllFullPaths(newTp));
+                    if (!all.isEmpty())
+                        definedFilters.put(newTp, new BookMarkFilter(all));
+                    selectedPaths.add(newTp);
+                } else {
+                    // fallback: maybe the old last item represented a full path string
+                    String possibleFull = segments[segments.length - 1];
+                    Object node = newModel.getNodeForFullPath(possibleFull);
+                    if (node != null) {
+                        TreePath newTp = new TreePath(new Object[] { BookmarksTreeModel.ROOT, node });
+                        selection.add(newTp);
+                        HashSet<String> oneBookmark = new HashSet<>();
+                        oneBookmark.add(possibleFull);
+                        definedFilters.put(newTp, new BookMarkFilter(oneBookmark));
+                        selectedPaths.add(newTp);
+                    }
+                }
             }
 
             App.get().bookmarksTree.setSelectionPaths(selectedPaths.toArray(new TreePath[0]));
 
         } else {
             boolean rootCollapsed = App.get().bookmarksTree.isCollapsed(0);
-            App.get().bookmarksTree.setModel(new BookmarksTreeModel());
+            BookmarksTreeModel newModel = new BookmarksTreeModel();
+            if (bookmarkSet != null)
+                newModel.bookmarks = new java.util.TreeSet<>(bookmarkSet);
+            App.get().bookmarksTree.setModel(newModel);
             if (rootCollapsed) {
                 App.get().bookmarksTree.collapseRow(0);
             }
@@ -151,6 +235,8 @@ public class BookmarksTreeListener implements TreeSelectionListener, TreeExpansi
     public void clearFilter() {
         clearing = true;
         App.get().bookmarksTree.clearSelection();
+        selection.clear();
+        definedFilters.clear();
         clearing = false;
     }
 

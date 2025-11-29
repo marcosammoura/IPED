@@ -45,20 +45,22 @@ import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
-import javax.swing.DefaultListModel;
+// Default list model replaced by tree model
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JDialog;
 import javax.swing.JLabel;
-import javax.swing.JList;
+import javax.swing.JTree;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.KeyStroke;
-import javax.swing.event.ListSelectionEvent;
-import javax.swing.event.ListSelectionListener;
+import javax.swing.event.TreeSelectionEvent;
+import javax.swing.event.TreeSelectionListener;
+import javax.swing.tree.TreePath;
+import javax.swing.tree.TreeSelectionModel;
 
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.lucene.index.LeafReader;
@@ -71,10 +73,9 @@ import org.apache.lucene.util.BytesRef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import iped.app.ui.bookmarks.BookmarkAndKey;
 import iped.app.ui.bookmarks.BookmarkColorsUtil;
 import iped.app.ui.bookmarks.BookmarkEditDialog;
-import iped.app.ui.bookmarks.BookmarkListRenderer;
+import iped.app.ui.bookmarks.BookmarkTreeCellRenderer;
 import iped.app.ui.utils.JTextFieldLimited;
 import iped.data.IItem;
 import iped.data.IItemId;
@@ -90,7 +91,7 @@ import iped.properties.BasicProps;
 import iped.utils.LocalizedFormat;
 import iped.viewers.util.ProgressDialog;
 
-public class BookmarksManager implements ActionListener, ListSelectionListener, KeyListener {
+public class BookmarksManager implements ActionListener, TreeSelectionListener, KeyListener {
 
     private static final Logger logger = LoggerFactory.getLogger(BookmarksManager.class);
 
@@ -112,9 +113,10 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
     JButton butNew = new JButton(Messages.getString("BookmarksManager.New")); //$NON-NLS-1$
     JButton butUpdateComment = new JButton(Messages.getString("BookmarksManager.Update")); //$NON-NLS-1$
     JButton butDelete = new JButton(Messages.getString("BookmarksManager.Delete")); //$NON-NLS-1$
-    DefaultListModel<BookmarkAndKey> listModel = new DefaultListModel<>();
-    JList<BookmarkAndKey> list = new JList<>(listModel);
-    JScrollPane scrollList = new JScrollPane(list);
+    // dialog does not need the NO_BOOKMARKS sentinel (it's used in the side-tab)
+    BookmarksTreeModel treeModel = new BookmarksTreeModel(false);
+    JTree tree = new JTree(treeModel);
+    JScrollPane scrollList = new JScrollPane(tree);
 
     private HashMap<KeyStroke, String> keystrokeToBookmark = new HashMap<>();
 
@@ -128,7 +130,8 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
 
     public static void setVisible() {
         instance.dialog.setVisible(true);
-        instance.list.clearSelection();
+        // ensure dialog always shows a single selection (root initially)
+        instance.tree.setSelectionPath(new javax.swing.tree.TreePath(new Object[] { BookmarksTreeModel.ROOT }));
         instance.newBookmark.setText("");
         instance.comments.setText("");
     }
@@ -223,24 +226,32 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
         butNew.addActionListener(this);
         butDelete.addActionListener(this);
 
-        list.addListSelectionListener(this);
+        // Dialog should always have a single selection active
+        tree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
+        tree.addTreeSelectionListener(this);
         // disable selection by typing
-        for (KeyListener kl : list.getKeyListeners()) {
-            list.removeKeyListener(kl);
+        for (KeyListener kl : tree.getKeyListeners()) {
+            tree.removeKeyListener(kl);
         }
-        list.addKeyListener(this);
-        list.addMouseListener(new MouseAdapter() {
+        tree.addKeyListener(this);
+        tree.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                // Double click in the list opens edit dialog
+                // Double click in the tree opens edit dialog for a single bookmark
                 if (e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
-                    if (list.getSelectedIndices().length == 1) {
-                        actionPerformed(new ActionEvent(butEdit, 0, ""));
+                    TreePath[] sel = tree.getSelectionPaths();
+                    if (sel != null && sel.length == 1) {
+                        java.util.Set<String> fullPaths = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel[0]);
+                        if (fullPaths.size() == 1) {
+                            actionPerformed(new ActionEvent(butEdit, 0, ""));
+                        }
                     }
                 }
             }
         });
-        list.setCellRenderer(new BookmarkListRenderer());
+        // Dialog shouldn't display counts in node labels -- it's for editing/management
+        tree.setCellRenderer(new BookmarkTreeCellRenderer(null, false));
+        // list renderer removed; tree renderer used instead
 
         dialog.setLocationRelativeTo(App.get());
 
@@ -251,47 +262,169 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
     }
 
     private void updateList(String oldBookmark, String newBookmark) {
-        TreeSet<BookmarkAndKey> bookmarks = new TreeSet<>();
+        IMultiBookmarks multi = null;
+        Set<String> bookmarkSet = null;
+        if (App.get() != null && App.get().appCase != null && App.get().appCase.getMultiBookmarks() != null) {
+            multi = App.get().appCase.getMultiBookmarks();
+            bookmarkSet = multi.getBookmarkSet();
+        } else {
+            // fallback for tests or headless scenarios: prefer the current tree model's
+            // backing set when tests replace the tree model directly (unit tests do that).
+            if (tree.getModel() instanceof BookmarksTreeModel) {
+                bookmarkSet = ((BookmarksTreeModel) tree.getModel()).bookmarks;
+            } else {
+                bookmarkSet = treeModel != null ? treeModel.bookmarks : null;
+            }
+        }
+
+        // try to preserve previous keystroke when renaming
         KeyStroke prevStroke = null;
-        if (!listModel.isEmpty()) {
-            for (int i = 0; i < listModel.size(); i++) {
-                BookmarkAndKey bk = listModel.get(i);
-                if (bk.getName().equalsIgnoreCase(oldBookmark)) {
-                    prevStroke = bk.getKey();
-                } else {
-                    bookmarks.add(bk);
+        if (oldBookmark != null) {
+            for (java.util.Map.Entry<KeyStroke, String> e : keystrokeToBookmark.entrySet()) {
+                if (e.getValue().equalsIgnoreCase(oldBookmark)) {
+                    prevStroke = e.getKey();
+                    break;
                 }
             }
         }
-        Set<String> bookmarkSet = App.get().appCase.getMultiBookmarks().getBookmarkSet();
-        for (String bookmark : bookmarkSet) {
-            BookmarkAndKey bk = new BookmarkAndKey(bookmark);
-            if (!bookmarks.contains(bk)) {
-                bookmarks.add(bk);
-            }
-            bk.setKey(App.get().appCase.getMultiBookmarks().getBookmarkKeyStroke(bookmark));
-        }
-        Iterator<BookmarkAndKey> iterator = bookmarks.iterator();
-        while (iterator.hasNext()) {
-            BookmarkAndKey bk = iterator.next();
-            if (prevStroke != null && bk.getName().equalsIgnoreCase(newBookmark)) {
-                bk.setKey(prevStroke);
-            }
-            if (!bookmarkSet.contains(bk.getName())) {
-                iterator.remove();
-            }
-        }
+
+        // ensure bookmarkSet is non-null for tests
+        if (bookmarkSet == null)
+            bookmarkSet = new TreeSet<>();
+
+        // reload keystroke map from authoritative source (when available)
         keystrokeToBookmark.clear();
-        for (BookmarkAndKey bk : bookmarks) {
-            if (bk.getKey() != null) {
-                keystrokeToBookmark.put(bk.getKey(), bk.getName());
-                keystrokeToBookmark.put(getRemoveKey(bk.getKey()), bk.getName());
+        if (multi != null) {
+            for (String bookmark : bookmarkSet) {
+                KeyStroke k = multi.getBookmarkKeyStroke(bookmark);
+                if (k != null) {
+                    keystrokeToBookmark.put(k, bookmark);
+                    keystrokeToBookmark.put(getRemoveKey(k), bookmark);
+                }
             }
         }
-        listModel.clear();
-        for (BookmarkAndKey b : bookmarks) {
-            listModel.addElement(b);
+
+        if (prevStroke != null && newBookmark != null && bookmarkSet.contains(newBookmark)) {
+            keystrokeToBookmark.put(prevStroke, newBookmark);
+            keystrokeToBookmark.put(getRemoveKey(prevStroke), newBookmark);
+            App.get().appCase.getMultiBookmarks().setBookmarkKeyStroke(newBookmark, prevStroke);
+            App.get().appCase.getMultiBookmarks().saveState();
         }
+
+        // Preserve selection and expanded nodes so the dialog remains stable after
+        // creating/updating/removing bookmarks. The dialog keeps a single selected
+        // node at all times (root if nothing else can be restored).
+        TreePath prevSel = tree.getSelectionPath();
+        String[] prevSelectedSegments = null;
+        if (prevSel != null) {
+            Object[] parts = prevSel.getPath();
+            if (parts.length > 1) {
+                prevSelectedSegments = new String[parts.length - 1];
+                for (int i = 1; i < parts.length; i++)
+                    prevSelectedSegments[i - 1] = parts[i].toString();
+            }
+        }
+
+        java.util.Enumeration<?> expanded = tree.getExpandedDescendants(new TreePath(tree.getModel().getRoot()));
+        java.util.List<String[]> expandedSegments = new java.util.ArrayList<>();
+        if (expanded != null) {
+            while (expanded.hasMoreElements()) {
+                TreePath p = (TreePath) expanded.nextElement();
+                Object[] parts = p.getPath();
+                if (parts.length <= 1)
+                    continue;
+                String[] segs = new String[parts.length - 1];
+                for (int i = 1; i < parts.length; i++)
+                    segs[i - 1] = parts[i].toString();
+                expandedSegments.add(segs);
+            }
+        }
+
+        boolean rootCollapsed = tree.isCollapsed(0);
+
+        treeModel = new BookmarksTreeModel(false); // dialog hides the NO_BOOKMARKS sentinel
+        treeModel.bookmarks = new TreeSet<>(bookmarkSet);
+        tree.setModel(treeModel);
+
+        // restore expanded paths that still exist in the rebuilt model
+        for (String[] segs : expandedSegments) {
+            java.util.List<Object> nodePath = treeModel.getNodePathForSegments(segs);
+            if (nodePath != null) {
+                Object[] pathArray = new Object[nodePath.size() + 1];
+                pathArray[0] = BookmarksTreeModel.ROOT;
+                for (int i = 0; i < nodePath.size(); i++)
+                    pathArray[i + 1] = nodePath.get(i);
+                tree.expandPath(new TreePath(pathArray));
+            }
+        }
+
+        if (rootCollapsed) {
+            tree.collapseRow(0);
+        }
+
+        // Restore selection: prefer explicitly requested new bookmark, otherwise
+        // attempt to map previous selection to the new model; if not present pick
+        // the parent of the previous selection (useful after deletion), or root.
+        boolean restored = false;
+        if (newBookmark != null && treeModel.getNodeForFullPath(newBookmark) != null) {
+            java.util.List<Object> nodePath = treeModel.getNodePathForSegments(newBookmark.split(java.util.regex.Pattern.quote(BookmarksTreeModel.SEPARATOR)));
+            if (nodePath != null) {
+                Object[] pathArray = new Object[nodePath.size() + 1];
+                pathArray[0] = BookmarksTreeModel.ROOT;
+                for (int i = 0; i < nodePath.size(); i++)
+                    pathArray[i + 1] = nodePath.get(i);
+                try {
+                    tree.setSelectionPath(new TreePath(pathArray));
+                } catch (Throwable t) {
+                    // ignore selection errors in headless tests
+                }
+                restored = true;
+                // selection restored above
+            }
+        }
+
+        if (!restored && prevSelectedSegments != null) {
+            // try to restore exactly, using previous selected path segments
+            // try to restore exactly
+            java.util.List<Object> nodePath = treeModel.getNodePathForSegments(prevSelectedSegments);
+            if (nodePath != null) {
+                Object[] pathArray = new Object[nodePath.size() + 1];
+                pathArray[0] = BookmarksTreeModel.ROOT;
+                for (int i = 0; i < nodePath.size(); i++)
+                    pathArray[i + 1] = nodePath.get(i);
+                try {
+                    tree.setSelectionPath(new TreePath(pathArray));
+                } catch (Throwable t) {
+                    // ignore selection errors in headless tests
+                }
+                restored = true;
+            } else {
+                // fallback: select closest ancestor that exists now (parent chain)
+                for (int len = prevSelectedSegments.length - 1; len >= 1 && !restored; len--) {
+                    String[] parentSegs = new String[len];
+                    System.arraycopy(prevSelectedSegments, 0, parentSegs, 0, len);
+                    java.util.List<Object> pp = treeModel.getNodePathForSegments(parentSegs);
+                    if (pp != null) {
+                        Object[] pathArray = new Object[pp.size() + 1];
+                        pathArray[0] = BookmarksTreeModel.ROOT;
+                        for (int i = 0; i < pp.size(); i++)
+                            pathArray[i + 1] = pp.get(i);
+                        try {
+                            tree.setSelectionPath(new TreePath(pathArray));
+                        } catch (Throwable t) {
+                            // ignore selection errors in headless tests
+                        }
+                        restored = true;
+                    }
+                }
+            }
+        }
+
+        if (!restored) {
+            // ensure there is always one selection in dialog: select root
+            tree.setSelectionPath(new TreePath(new Object[] { BookmarksTreeModel.ROOT }));
+        }
+        // finished restoring selection/expansion
     }
 
     private List<String> getEmptyDataHashes() {
@@ -427,41 +560,75 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
     public void actionPerformed(final ActionEvent evt) {
         if (evt.getSource() == butAdd || evt.getSource() == butRemove || evt.getSource() == butUpdateComment || evt.getSource() == butEdit || evt.getSource() == butDelete) {
             // Check if there is at least one bookmark selected
-            if (list.getSelectedIndex() == -1) {
+            TreePath[] sel = tree.getSelectionPaths();
+            if (sel == null || sel.length == 0) {
                 showMessage(Messages.getString("BookmarksManager.AlertNoSelectedBookmarks"));
                 return;
             }
         }
 
         if (evt.getSource() == butUpdateComment || evt.getSource() == butEdit) {
-            // Check if there is more than one bookmark selected
-            if (list.getSelectedIndices().length > 1) {
+            // Check if there is more than one selection
+            TreePath[] sel = tree.getSelectionPaths();
+            if (sel != null && sel.length > 1) {
                 showMessage(Messages.getString("BookmarksManager.AlertMultipleSelectedBookmarks"));
                 return;
             }
         }
 
         IMultiBookmarks multiBookmarks = App.get().appCase.getMultiBookmarks();
+
         if (evt.getSource() == butNew) {
-            String name = newBookmark.getText().trim();
+            String input = newBookmark.getText().trim();
             String comment = comments.getText().trim();
-            if (!name.isEmpty() && !listModel.contains(new BookmarkAndKey(name))) {
-                multiBookmarks.newBookmark(name);
-                multiBookmarks.setBookmarkComment(name, comment);
-                multiBookmarks.setBookmarkColor(name, BookmarkColorsUtil.getInitialColor(multiBookmarks.getUsedColors(), name));
-                updateList();
-            }
-            list.clearSelection();
-            for (int i = 0; i < listModel.size(); i++) {
-                if (listModel.get(i).getName().equalsIgnoreCase(name)) {
-                    list.setSelectedIndex(i);
+            if (!input.isEmpty()) {
+                TreePath[] sel = tree.getSelectionPaths();
+                String fullName = BookmarksUtil.computeNewBookmarkFullName(input, sel != null && sel.length == 1 ? sel[0] : null);
+
+                if (!fullName.isEmpty() && !App.get().appCase.getMultiBookmarks().getBookmarkSet().contains(fullName)) {
+                    multiBookmarks.newBookmark(fullName);
+                    multiBookmarks.setBookmarkComment(fullName, comment);
+                    multiBookmarks.setBookmarkColor(fullName, BookmarkColorsUtil.getInitialColor(multiBookmarks.getUsedColors(), fullName));
+                    updateList();
+                    // ensure the UI tree and filters are refreshed after creating a new
+                    // bookmark so the tree reflects the up-to-date set
+                    BookmarksController.get().updateUI();
+                }
+
+                // select new bookmark in tree
+                Object node = treeModel.getNodeForFullPath(fullName);
+                if (node != null) {
+                    java.util.List<Object> nodePath = treeModel.getNodePathForSegments(fullName.split(java.util.regex.Pattern.quote(BookmarksTreeModel.SEPARATOR)));
+                    if (nodePath != null) {
+                        Object[] pathArray = new Object[nodePath.size() + 1];
+                        pathArray[0] = BookmarksTreeModel.ROOT;
+                        for (int i = 0; i < nodePath.size(); i++)
+                            pathArray[i + 1] = nodePath.get(i);
+                        tree.setSelectionPath(new TreePath(pathArray));
+                    }
+                } else {
+                    tree.clearSelection();
                 }
             }
-
         }
+
+
+    /**
+     * Compute the full bookmark name given user input and a selected tree path.
+     * - if input contains '/', it is treated as a full path and returned as-is
+     * - if a single node is selected, build a child full path by joining the selected
+     *   node path segments (excluding ROOT and the NO_BOOKMARKS sentinel) and the input
+     * - otherwise return the input as a top-level (root) bookmark name
+     */
+    
         if (evt.getSource() == butUpdateComment) {
-            int idx = list.getSelectedIndex();
-            String bookmarkName = list.getModel().getElementAt(idx).getName();
+            TreePath[] s = tree.getSelectionPaths();
+            if (s == null || s.length != 1)
+                return;
+            java.util.Set<String> fp = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(s[0]);
+            if (fp.size() != 1)
+                return;
+            String bookmarkName = fp.iterator().next();
             multiBookmarks.setBookmarkComment(bookmarkName, comments.getText());
             multiBookmarks.saveState();
         }
@@ -471,8 +638,13 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
             ArrayList<IItemId> uniqueSelectedIds = getUniqueSelectedIds();
 
             ArrayList<String> bookmarks = new ArrayList<String>();
-            for (int index : list.getSelectedIndices())
-                bookmarks.add(list.getModel().getElementAt(index).getName());
+            TreePath[] selected = tree.getSelectionPaths();
+            if (selected != null) {
+                for (TreePath tp : selected) {
+                    Set<String> fps = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(tp);
+                    bookmarks.addAll(fps);
+                }
+            }
 
             boolean insert = evt.getSource() == butAdd || evt.getSource() == butNew;
             bookmark(uniqueSelectedIds, bookmarks, insert, evt.getSource() == butNew);
@@ -481,9 +653,14 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
             int result = JOptionPane.showConfirmDialog(dialog, Messages.getString("BookmarksManager.ConfirmDelete"), //$NON-NLS-1$
                     Messages.getString("BookmarksManager.ConfirmDelTitle"), JOptionPane.YES_NO_OPTION); //$NON-NLS-1$
             if (result == JOptionPane.YES_OPTION) {
-                for (int index : list.getSelectedIndices()) {
-                    String bookmark = list.getModel().getElementAt(index).getName();
-                    multiBookmarks.delBookmark(bookmark);
+                TreePath[] selected = tree.getSelectionPaths();
+                if (selected != null) {
+                    for (TreePath tp : selected) {
+                        Set<String> fps = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(tp);
+                        for (String bookmark : fps) {
+                            multiBookmarks.delBookmark(bookmark);
+                        }
+                    }
                 }
                 updateList();
                 multiBookmarks.saveState();
@@ -492,7 +669,13 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
             }
 
         } else if (evt.getSource() == butEdit) {
-            String currentName = list.getSelectedValue().getName();
+            TreePath[] sel2 = tree.getSelectionPaths();
+            if (sel2 == null || sel2.length != 1)
+                return;
+            Set<String> current = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel2[0]);
+            if (current.size() != 1)
+                return;
+            String currentName = current.iterator().next();
             Color currentColor = multiBookmarks.getBookmarkColor(currentName);
             BookmarkEditDialog editDialog = new BookmarkEditDialog(dialog, currentName, currentColor);
             editDialog.setVisible(true);
@@ -501,7 +684,7 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
             String newName = editDialog.getNewName();
             if (newName != null) {
                 if (!newName.isEmpty() && !newName.equals(currentName)) {
-                    if (!currentName.equalsIgnoreCase(newName) && listModel.contains(new BookmarkAndKey(newName))) {
+                    if (!currentName.equalsIgnoreCase(newName) && App.get().appCase.getMultiBookmarks().getBookmarkSet().contains(newName)) {
                         JOptionPane.showMessageDialog(dialog, Messages.getString("BookmarksManager.AlreadyExists"));
                     } else {
                         multiBookmarks.renameBookmark(currentName, newName);
@@ -521,7 +704,7 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
             if (changed) {
                 multiBookmarks.saveState();
                 BookmarksController.get().updateUI();
-                list.repaint();
+                tree.repaint();
             }
         }
 
@@ -583,15 +766,23 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
     }
 
     @Override
-    public void valueChanged(ListSelectionEvent e) {
-        int idx = list.getSelectedIndex();
-        if (idx == -1) {
+    public void valueChanged(TreeSelectionEvent e) {
+        TreePath[] sel = tree.getSelectionPaths();
+        if (sel == null || sel.length != 1) {
             comments.setText(null);
             newBookmark.setText(null);
             return;
         }
-        String bookmarkName = list.getModel().getElementAt(idx).getName();
-        String comment = App.get().appCase.getMultiBookmarks().getBookmarkComment(bookmarkName);
+        java.util.Set<String> fps = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel[0]);
+        if (fps.size() != 1) {
+            comments.setText(null);
+            newBookmark.setText(null);
+            return;
+        }
+        String bookmarkName = fps.iterator().next();
+        String comment = null;
+        if (App.get() != null && App.get().appCase != null && App.get().appCase.getMultiBookmarks() != null)
+            comment = App.get().appCase.getMultiBookmarks().getBookmarkComment(bookmarkName);
         newBookmark.setText(bookmarkName);
         comments.setText(comment);
     }
@@ -631,7 +822,7 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
         // Avoid conflict with keys that are used for item selection (space) and
         // recursive item selection (R), parents (P), references (F) and referenced by (D)
         if (e.getKeyCode() == KeyEvent.VK_SPACE || Arrays.asList('R', 'P', 'F', 'D').contains((char) e.getKeyCode())) {
-            if (e.getSource() == list) {
+            if (e.getSource() == tree) {
                 showMessage(Messages.getString("BookmarksManager.KeyStrokeAlert4"));
                 e.consume();
             }
@@ -640,8 +831,9 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
 
         KeyStroke stroke = KeyStroke.getKeyStroke(e.getKeyCode(), e.getModifiersEx(), true);
 
-        if (e.getSource() == list) {
-            if (list.getSelectedIndices().length != 1) {
+        if (e.getSource() == tree) {
+            TreePath[] selPaths = tree.getSelectionPaths();
+            if (selPaths == null || selPaths.length != 1) {
                 showMessage(Messages.getString("BookmarksManager.KeyStrokeAlert1"));
                 e.consume();
                 return;
@@ -651,14 +843,20 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
                 e.consume();
                 return;
             }
-
-            int index = list.getSelectedIndex();
+            // selected node must correspond to a single full-path bookmark
+            Set<String> fps = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(selPaths[0]);
+            if (fps.size() != 1) {
+                showMessage(Messages.getString("BookmarksManager.KeyStrokeAlert1"));
+                e.consume();
+                return;
+            }
+            String bookmarkStr = fps.iterator().next();
 
             if (keystrokeToBookmark.containsKey(stroke)) {
-                if (list.getModel().getElementAt(index).getKey() == stroke) {
-                    removeKeyStroke(list.getModel().getElementAt(index).getName());
-                    list.getModel().getElementAt(index).setKey(null);
-                    list.repaint();
+                String mapped = keystrokeToBookmark.get(stroke);
+                if (mapped != null && mapped.equalsIgnoreCase(bookmarkStr)) {
+                    removeKeyStroke(bookmarkStr);
+                    tree.repaint();
                 } else {
                     showMessage(Messages.getString("BookmarksManager.KeyStrokeAlert3"));
                 }
@@ -666,13 +864,10 @@ public class BookmarksManager implements ActionListener, ListSelectionListener, 
                 return;
             }
 
-            list.getModel().getElementAt(index).setKey(stroke);
-            list.repaint();
-
-            String bookmarkStr = list.getModel().getElementAt(index).getName();
+            // assign
             removeKeyStroke(bookmarkStr);
-
             setKeyStroke(stroke, bookmarkStr);
+            tree.repaint();
             e.consume();
 
         } else {

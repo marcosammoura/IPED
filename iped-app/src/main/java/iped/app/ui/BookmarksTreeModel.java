@@ -4,6 +4,8 @@ import java.text.Collator;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.swing.event.TreeModelListener;
 import javax.swing.tree.TreeModel;
@@ -16,14 +18,190 @@ public class BookmarksTreeModel implements TreeModel {
 
     public static final BookmarkRoot ROOT = new BookmarkRoot();
     public static final NoBookmarks NO_BOOKMARKS = new NoBookmarks();
+    // hierarchy separator used in full bookmark names
+    public static final String SEPARATOR = ">>>";
 
     public Set<String> bookmarks;
+
+    /** When true the model exposes a NO_BOOKMARKS sentinel as the first child of
+     * the root. Some UI consumers (eg. the bookmarks-edit dialog) prefer hiding
+     * this sentinel — create the model with includeNoBookmarks=false in that
+     * case. Default behavior is to include the sentinel.
+     */
+    private final boolean includeNoBookmarks;
+
 
     private static class BookmarkRoot {
         public String toString() {
             return ROOT_NAME;
         }
     }
+
+    public BookmarksTreeModel() {
+        this(true);
+    }
+
+    public BookmarksTreeModel(boolean includeNoBookmarks) {
+        this.includeNoBookmarks = includeNoBookmarks;
+    }
+
+    /**
+     * Return a node (object returned by getChild) for the given full bookmark path
+     * or null if not found. Returned object is suitable to be used as tree node.
+     */
+    public Object getNodeForFullPath(String fullPath) {
+        ensureTree();
+        return findNodeByFullPath(parsedRoot, fullPath);
+    }
+
+    private Object findNodeByFullPath(BookmarkNode cur, String fullPath) {
+        if (cur.fullPath != null && cur.fullPath.equals(fullPath))
+            return cur;
+        for (BookmarkNode c : cur.children) {
+            Object found = findNodeByFullPath(c, fullPath);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    /**
+     * Collect all bookmark full paths under the given node/object. Accepts either
+     * objects produced by this model (BookmarkNode), plain String (a full path
+     * name) or the special ROOT/NO_BOOKMARKS objects.
+     */
+    public Set<String> collectAllFullPaths(Object nodeObj) {
+        Set<String> ret = new TreeSet<>();
+        if (nodeObj == null)
+            return ret;
+        if (nodeObj.equals(ROOT) || nodeObj.equals(NO_BOOKMARKS))
+            return ret;
+        ensureTree();
+        if (nodeObj instanceof String) {
+            String s = (String) nodeObj;
+            if (bookmarks.contains(s))
+                ret.add(s);
+            return ret;
+        }
+
+        // nodeObj should be an internal node created by this model
+        // fallback: search in the tree for its string representation
+        // try to match by object equality
+        if (nodeObj instanceof BookmarkNode) {
+            collectRec((BookmarkNode) nodeObj, ret);
+            return ret;
+        }
+
+        // If it's some other object (old selection saved as a string), attempt to
+        // interpret its toString() as a full path.
+        String s = nodeObj.toString();
+        if (bookmarks.contains(s))
+            ret.add(s);
+        return ret;
+    }
+
+    /**
+     * Collect all full bookmark paths represented by the given TreePath. TreePath
+     * should include ROOT as the first segment; method will navigate the model
+     * by segment names and collect all descendant full paths.
+     */
+    public Set<String> collectAllFullPaths(TreePath treePath) {
+        if (treePath == null)
+            return new TreeSet<>();
+        Object[] path = treePath.getPath();
+        if (path.length == 0)
+            return new TreeSet<>();
+        if (path.length == 1) // ROOT only
+            return new TreeSet<>();
+        Object last = path[path.length - 1];
+        // if it is the NO_BOOKMARKS sentinel
+        if (last == NO_BOOKMARKS)
+            return new TreeSet<>();
+
+        // build segments excluding ROOT
+        String[] segments = new String[path.length - 1];
+        for (int i = 1; i < path.length; i++) {
+            segments[i - 1] = path[i].toString();
+        }
+
+        // try to find the corresponding node chain in the current model
+        List<Object> nodePath = getNodePathForSegments(segments);
+        if (nodePath != null) {
+            // last node in the nodePath is the node we want to collect from
+            Object lastNode = nodePath.get(nodePath.size() - 1);
+            return collectAllFullPaths(lastNode);
+        }
+
+        // fallback: if the last path component is a full bookmark name in the set
+        String possibleFull = segments[segments.length - 1];
+        Set<String> res = new TreeSet<>();
+        if (bookmarks.contains(possibleFull)) {
+            res.add(possibleFull);
+        }
+        return res;
+    }
+
+    /**
+     * Find a node matching the given segment chain and return the chain of nodes
+     * from the top-level down to the matching node (excluding the ROOT object).
+     * Segments should be an array of node names (the display name for each level).
+     * Returns null when no matching chain is found.
+     */
+    public List<Object> getNodePathForSegments(String[] segments) {
+        ensureTree();
+        BookmarkNode cur = parsedRoot;
+        List<Object> path = new ArrayList<>();
+        for (String seg : segments) {
+            BookmarkNode child = cur.getChildByName(seg);
+            if (child == null)
+                return null;
+            path.add(child);
+            cur = child;
+        }
+        return path;
+    }
+
+    private void collectRec(BookmarkNode node, Set<String> out) {
+        if (node.fullPath != null)
+            out.add(node.fullPath);
+        for (BookmarkNode c : node.children)
+            collectRec(c, out);
+    }
+
+    private static class BookmarkNode {
+        final String name; // display name (last segment)
+        String fullPath; // full bookmark path (non-null if node represents an actual bookmark)
+        final TreeSet<BookmarkNode> children = new TreeSet<>((a, b) -> Collator.getInstance().compare(a.name, b.name));
+
+        BookmarkNode(String name, String fullPath) {
+            this.name = name;
+            this.fullPath = fullPath;
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+
+        boolean isLeaf() {
+            return children.isEmpty();
+        }
+
+        void addChild(BookmarkNode child) {
+            children.remove(child);
+            children.add(child);
+        }
+
+        BookmarkNode getChildByName(String childName) {
+            for (BookmarkNode c : children) {
+                if (c.name.equals(childName))
+                    return c;
+            }
+            return null;
+        }
+    }
+
+    private BookmarkNode parsedRoot;
 
     private static class NoBookmarks {
         public String toString() {
@@ -38,46 +216,60 @@ public class BookmarksTreeModel implements TreeModel {
 
     @Override
     public Object getChild(Object parent, int index) {
-        if (!ROOT.equals(parent)) {
-            return null;
+        if (ROOT.equals(parent)) {
+            ensureTree();
+            // Optionally include NO_BOOKMARKS as the first child
+            if (includeNoBookmarks) {
+                if (index == 0)
+                    return NO_BOOKMARKS;
+                // return top-level child nodes (shift by one because sentinel occupies index 0)
+                List<BookmarkNode> top = new ArrayList<>(parsedRoot.children);
+                return top.get(index - 1);
+            } else {
+                // no sentinel -> top-level nodes start at index 0
+                List<BookmarkNode> top = new ArrayList<>(parsedRoot.children);
+                return top.get(index);
+            }
         }
 
-        if (bookmarks == null) {
-            bookmarks = new TreeSet<>();
-            bookmarks.addAll(App.get().appCase.getMultiBookmarks().getBookmarkSet());
+        if (parent instanceof BookmarkNode) {
+            BookmarkNode parentNode = (BookmarkNode) parent;
+            List<BookmarkNode> chil = new ArrayList<>(parentNode.children);
+            return chil.get(index);
         }
 
-        if (index == 0) {
-            return NO_BOOKMARKS;
-        }
-
-        String[] array = bookmarks.toArray(new String[0]);
-        Arrays.sort(array, Collator.getInstance());
-
-        return array[index - 1];
+        return null;
 
     }
 
     @Override
     public int getChildCount(Object parent) {
-        if (!ROOT.equals(parent)) {
-            return 0;
-        } else {
-            if (App.get().appCase == null) {
+        if (ROOT.equals(parent)) {
+            // allow functionality in unit tests when bookmarks are pre-populated
+            if ((bookmarks == null || bookmarks.isEmpty()) && (App.get() == null || App.get().appCase == null)) {
                 return 0;
-            } else {
-                return App.get().appCase.getMultiBookmarks().getBookmarkSet().size() + 1;
             }
+            ensureTree();
+            // top-level nodes +/- NO_BOOKMARKS sentinel
+            return parsedRoot.children.size() + (includeNoBookmarks ? 1 : 0);
+        } else if (parent instanceof BookmarkNode) {
+            BookmarkNode node = (BookmarkNode) parent;
+            return node.children.size();
         }
+        return 0;
     }
 
     @Override
     public boolean isLeaf(Object node) {
-        if (!ROOT.equals(node)) {
-            return true;
-        } else {
+        if (ROOT.equals(node))
             return false;
+
+        if (node instanceof BookmarkNode) {
+            return ((BookmarkNode) node).isLeaf();
         }
+
+        // NO_BOOKMARKS or unknown objects are leafs
+        return true;
     }
 
     @Override
@@ -88,7 +280,64 @@ public class BookmarksTreeModel implements TreeModel {
 
     @Override
     public int getIndexOfChild(Object parent, Object child) {
-        return 0;
+        if (ROOT.equals(parent)) {
+            if (child == NO_BOOKMARKS)
+                return 0;
+            ensureTree();
+            List<BookmarkNode> top = new ArrayList<>(parsedRoot.children);
+            for (int i = 0; i < top.size(); i++) {
+                if (top.get(i).equals(child))
+                    return i + (includeNoBookmarks ? 1 : 0);
+            }
+            return -1;
+        }
+
+        if (parent instanceof BookmarkNode && child instanceof BookmarkNode) {
+            BookmarkNode p = (BookmarkNode) parent;
+            List<BookmarkNode> list = new ArrayList<>(p.children);
+            for (int i = 0; i < list.size(); i++) {
+                if (list.get(i).equals(child))
+                    return i;
+            }
+        }
+        return -1;
+    }
+
+    private void ensureTree() {
+        parsedRoot = new BookmarkNode("", null);
+        // If bookmarks already set externally (e.g., injected in tests), use it.
+        if (bookmarks == null || bookmarks.isEmpty()) {
+            if (App.get() != null && App.get().appCase != null)
+                bookmarks = new TreeSet<>(App.get().appCase.getMultiBookmarks().getBookmarkSet());
+            else
+                bookmarks = new TreeSet<>();
+        }
+
+        for (String full : bookmarks) {
+            // Support legacy stored bookmarks that used '/' as a separator.
+            // Split using either the configured SEPARATOR (eg. ">>>") or the
+            // legacy '/' so both formats produce the same tree structure.
+            String regex = java.util.regex.Pattern.quote(SEPARATOR) + "|" + java.util.regex.Pattern.quote("/");
+            String[] parts = full.split(regex);
+            BookmarkNode cur = parsedRoot;
+            StringBuilder path = new StringBuilder();
+            for (int i = 0; i < parts.length; i++) {
+                String part = parts[i];
+                if (path.length() > 0)
+                    path.append('/');
+                path.append(part);
+                BookmarkNode child = cur.getChildByName(part);
+                if (child == null) {
+                    String nodeFull = (i == parts.length - 1) ? full : null;
+                    child = new BookmarkNode(part, nodeFull);
+                    cur.addChild(child);
+                } else if (i == parts.length - 1) {
+                    // make sure the final node knows it's an actual bookmark
+                    child.fullPath = full;
+                }
+                cur = child;
+            }
+        }
     }
 
     @Override
