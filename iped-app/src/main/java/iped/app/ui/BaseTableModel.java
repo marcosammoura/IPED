@@ -17,7 +17,7 @@ import iped.engine.search.IPEDSearcher;
 import iped.engine.search.LuceneSearchResult;
 import iped.engine.search.MultiSearchResult;
 import iped.engine.task.index.IndexItem;
-// util concatStrings kept in engine util; bookmark display uses BookmarksUtil
+import iped.engine.util.Util;
 import iped.properties.BasicProps;
 import iped.search.IMultiSearchResult;
 
@@ -87,8 +87,8 @@ public abstract class BaseTableModel extends AbstractTableModel implements Mouse
                 return App.get().appCase.getMultiBookmarks().isChecked(App.get().appCase.getItemId(results.getLuceneIds()[row]));
 
             case 2:
-                // Item Bookmarks (use leaf-only names for display)
-                return BookmarksUtil.concatLeafNames(App.get().appCase.getMultiBookmarks().getBookmarkList(App.get().appCase.getItemId(results.getLuceneIds()[row])));
+                // Item Bookmarks
+                return Util.concatStrings(App.get().appCase.getMultiBookmarks().getBookmarkList(App.get().appCase.getItemId(results.getLuceneIds()[row])));
 
             case 3:
                 // Item Name
