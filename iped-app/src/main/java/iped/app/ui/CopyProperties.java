@@ -35,7 +35,7 @@ import org.apache.lucene.document.Document;
 import iped.data.IItemId;
 import iped.engine.lucene.analysis.CategoryTokenizer;
 import iped.engine.task.index.IndexItem;
-// concatStrings was in engine util; bookmark CSV uses BookmarksUtil
+import iped.engine.util.Util;
 import iped.utils.DateUtil;
 
 public class CopyProperties extends SwingWorker<Boolean, Integer> implements PropertyChangeListener {
@@ -91,7 +91,7 @@ public class CopyProperties extends SwingWorker<Boolean, Integer> implements Pro
                         values = doc.getValues(fields.get(col));
                     } else {
                         IItemId item = App.get().appCase.getItemId(docId);
-                        values[0] = BookmarksUtil.concatLeafNames(App.get().appCase.getMultiBookmarks().getBookmarkList(item));
+                        values[0] = Util.concatStrings(App.get().appCase.getMultiBookmarks().getBookmarkList(item));
                     }
                     if (values.length > 0 && values[0] == null)
                         values[0] = ""; //$NON-NLS-1$

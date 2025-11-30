@@ -38,7 +38,7 @@ import iped.data.IItemId;
 import iped.engine.localization.CategoryLocalization;
 import iped.engine.search.TimelineResults.TimeItemId;
 import iped.engine.task.index.IndexItem;
-// Using BookmarksUtil for bookmark column display/sorting
+import iped.engine.util.Util;
 import iped.properties.BasicProps;
 import iped.properties.ExtraProperties;
 
@@ -254,9 +254,7 @@ public class RowComparator implements Comparator<Integer> {
                 return 1;
 
         } else if (bookmarkCol) {
-            String aStr = BookmarksUtil.concatLeafNames(app.appCase.getMultiBookmarks().getBookmarkList(itemA));
-            String bStr = BookmarksUtil.concatLeafNames(app.appCase.getMultiBookmarks().getBookmarkList(itemB));
-            return aStr.compareTo(bStr);
+            return Util.concatStrings(app.appCase.getMultiBookmarks().getBookmarkList(itemA)).compareTo(Util.concatStrings(app.appCase.getMultiBookmarks().getBookmarkList(itemB)));
 
         } else if (isTimeStamp && itemA instanceof TimeItemId) {
             int ordA = ((TimeItemId) itemA).getTimeStampOrd();
