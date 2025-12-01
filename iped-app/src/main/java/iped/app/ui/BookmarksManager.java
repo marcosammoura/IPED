@@ -73,6 +73,7 @@ import org.apache.lucene.util.BytesRef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import iped.app.ui.bookmarks.BookmarkAndKey;
 import iped.app.ui.bookmarks.BookmarkColorsUtil;
 import iped.app.ui.bookmarks.BookmarkEditDialog;
 import iped.app.ui.bookmarks.BookmarkTreeCellRenderer;
@@ -113,7 +114,6 @@ public class BookmarksManager implements ActionListener, TreeSelectionListener, 
     JButton butNew = new JButton(Messages.getString("BookmarksManager.New")); //$NON-NLS-1$
     JButton butUpdateComment = new JButton(Messages.getString("BookmarksManager.Update")); //$NON-NLS-1$
     JButton butDelete = new JButton(Messages.getString("BookmarksManager.Delete")); //$NON-NLS-1$
-    // dialog does not need the NO_BOOKMARKS sentinel (it's used in the side-tab)
     BookmarksTreeModel treeModel = new BookmarksTreeModel(false);
     JTree tree = new JTree(treeModel);
     JScrollPane scrollList = new JScrollPane(tree);
@@ -130,7 +130,6 @@ public class BookmarksManager implements ActionListener, TreeSelectionListener, 
 
     public static void setVisible() {
         instance.dialog.setVisible(true);
-        // ensure dialog always shows a single selection (root initially)
         instance.tree.setSelectionPath(new javax.swing.tree.TreePath(new Object[] { BookmarksTreeModel.ROOT }));
         instance.newBookmark.setText("");
         instance.comments.setText("");
@@ -241,7 +240,7 @@ public class BookmarksManager implements ActionListener, TreeSelectionListener, 
                 if (e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
                     TreePath[] sel = tree.getSelectionPaths();
                     if (sel != null && sel.length == 1) {
-                        java.util.Set<String> fullPaths = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel[0]);
+                        Set<String> fullPaths = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel[0]);
                         if (fullPaths.size() == 1) {
                             actionPerformed(new ActionEvent(butEdit, 0, ""));
                         }
@@ -249,12 +248,8 @@ public class BookmarksManager implements ActionListener, TreeSelectionListener, 
                 }
             }
         });
-        // Dialog shouldn't display counts in node labels -- it's for editing/management
-        tree.setCellRenderer(new BookmarkTreeCellRenderer(null, false));
-        // list renderer removed; tree renderer used instead
-
+        tree.setCellRenderer(new BookmarkTreeCellRenderer(false));
         dialog.setLocationRelativeTo(App.get());
-
     }
 
     public void updateList() {
@@ -773,16 +768,14 @@ public class BookmarksManager implements ActionListener, TreeSelectionListener, 
             newBookmark.setText(null);
             return;
         }
-        java.util.Set<String> fps = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel[0]);
+        Set<String> fps = ((BookmarksTreeModel) tree.getModel()).collectAllFullPaths(sel[0]);
         if (fps.size() != 1) {
             comments.setText(null);
             newBookmark.setText(null);
             return;
         }
         String bookmarkName = fps.iterator().next();
-        String comment = null;
-        if (App.get() != null && App.get().appCase != null && App.get().appCase.getMultiBookmarks() != null)
-            comment = App.get().appCase.getMultiBookmarks().getBookmarkComment(bookmarkName);
+        String comment = App.get().appCase.getMultiBookmarks().getBookmarkComment(bookmarkName);
         newBookmark.setText(bookmarkName);
         comments.setText(comment);
     }
